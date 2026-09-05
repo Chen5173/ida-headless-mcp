@@ -381,7 +381,9 @@ def main():
         if not url.hostname or not url.port:
             print(f"Error: invalid transport URL: {transport}", file=sys.stderr)
             sys.exit(1)
-        mcp.serve(host=url.hostname, port=url.port, background=False)
+        # The pool proxy itself never touches IDA (its worker instances do),
+        # so it may keep concurrent request handling in foreground mode.
+        mcp.serve(host=url.hostname, port=url.port, background=False, threaded=True)
 
 
 if __name__ == "__main__":

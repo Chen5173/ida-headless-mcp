@@ -54,7 +54,12 @@ class McpServeTransportTests(unittest.TestCase):
         _FakeThreadingHTTPServer.reset()
         _FakeHTTPServer.reset()
 
-    def test_foreground_tcp_server_is_threaded_for_sse(self):
+    def test_foreground_tcp_server_is_single_threaded_for_headless(self):
+        # Headless idalib must run tool calls on the MAIN thread (see
+        # sync.py / idalib_server.py). Foreground servers are single-threaded
+        # by default so the HTTP handler runs on the thread that calls
+        # serve_forever(). Regression test for the Windows/TCP deadlock where
+        # ThreadingHTTPServer ran idalib_open off the main thread.
         server = McpServer("ida-pro-mcp")
         with patch.object(mcp_mod, "ThreadingHTTPServer", _FakeThreadingHTTPServer):
             with patch.object(mcp_mod, "HTTPServer", _FakeHTTPServer):
@@ -62,6 +67,45 @@ class McpServeTransportTests(unittest.TestCase):
                     host="127.0.0.1",
                     port=27144,
                     background=False,
+                    request_handler=McpHttpRequestHandler,
+                )
+
+        self.assertEqual(len(_FakeThreadingHTTPServer.instances), 0)
+        self.assertEqual(len(_FakeHTTPServer.instances), 1)
+        self.assertTrue(_FakeHTTPServer.instances[0].bound)
+        self.assertTrue(_FakeHTTPServer.instances[0].activated)
+        self.assertTrue(_FakeHTTPServer.instances[0].served)
+
+    def test_background_tcp_server_is_threaded(self):
+        # Background / GUI-plugin servers handle requests on worker threads;
+        # the in-IDA main loop dispatches @idasync via execute_sync there.
+        server = McpServer("ida-pro-mcp")
+        with patch.object(mcp_mod, "ThreadingHTTPServer", _FakeThreadingHTTPServer):
+            with patch.object(mcp_mod, "HTTPServer", _FakeHTTPServer):
+                server.serve(
+                    host="127.0.0.1",
+                    port=27145,
+                    background=True,
+                    request_handler=McpHttpRequestHandler,
+                )
+
+        self.assertEqual(len(_FakeThreadingHTTPServer.instances), 1)
+        self.assertEqual(len(_FakeHTTPServer.instances), 0)
+        self.assertTrue(_FakeThreadingHTTPServer.instances[0].bound)
+        self.assertTrue(_FakeThreadingHTTPServer.instances[0].activated)
+        self.assertTrue(_FakeThreadingHTTPServer.instances[0].served)
+
+    def test_foreground_tcp_server_can_request_threaded_for_sse(self):
+        # SSE needs a long-lived GET stream plus concurrent POST handling;
+        # opt in explicitly with threaded=True even in foreground mode.
+        server = McpServer("ida-pro-mcp")
+        with patch.object(mcp_mod, "ThreadingHTTPServer", _FakeThreadingHTTPServer):
+            with patch.object(mcp_mod, "HTTPServer", _FakeHTTPServer):
+                server.serve(
+                    host="127.0.0.1",
+                    port=27146,
+                    background=False,
+                    threaded=True,
                     request_handler=McpHttpRequestHandler,
                 )
 

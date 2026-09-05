@@ -489,7 +489,12 @@ def main():
     if args.unix_socket:
         MCP_SERVER.serve(unix_socket=args.unix_socket, background=False)
     else:
-        MCP_SERVER.serve(host=args.host, port=args.port, background=False)
+        # Headless IDALib requires every tool call (incl. idalib_open's
+        # open_database and all @idasync tools) to run on the MAIN thread.
+        # serve() defaults to a single-threaded server in foreground mode
+        # (threaded=False), so the HTTP handler executes on the thread that
+        # runs serve_forever() - see zeromcp/mcp.py serve().
+        MCP_SERVER.serve(host=args.host, port=args.port, background=False, threaded=False)
 
 
 if __name__ == "__main__":

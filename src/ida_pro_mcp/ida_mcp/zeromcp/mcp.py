@@ -65,12 +65,25 @@ class _McpSseConnection:
             self.alive = False
             return False
 
+# Unix domain sockets are unavailable on some platforms (Windows ships no
+# socket.AF_UNIX).  Guard class definitions so importing this module never
+# crashes there; the classes are only constructed via serve(unix_socket=...),
+# which now fails with a clear message on such platforms.
+_HAS_AF_UNIX = hasattr(socket, "AF_UNIX")
+
+
 class _UnixHTTPServerMixin:
     """Mixin that makes an HTTPServer subclass listen on a Unix domain socket."""
 
-    address_family = socket.AF_UNIX
+    if _HAS_AF_UNIX:
+        address_family = socket.AF_UNIX
 
     def server_bind(self):
+        if not _HAS_AF_UNIX:
+            raise RuntimeError(
+                "Unix domain sockets are not supported on this platform "
+                "(socket.AF_UNIX is unavailable). Use TCP host/port instead."
+            )
         if isinstance(self.server_address, str) and os.path.exists(self.server_address):
             os.unlink(self.server_address)
         # Skip HTTPServer.server_bind which unpacks (host, port) — that
@@ -448,20 +461,37 @@ class McpServer:
     def prompt(self, func: Callable) -> Callable:
         return self.prompts.method(func)
 
-    def serve(self, host: str = "", port: int = 0, *, unix_socket: str | None = None, background = True, request_handler = McpHttpRequestHandler):
+    def serve(self, host: str = "", port: int = 0, *, unix_socket: str | None = None, background = True, threaded: bool | None = None, request_handler = McpHttpRequestHandler):
         if self._running:
             print("[MCP] Server is already running")
             return
 
         # Create server with deferred binding
         assert issubclass(request_handler, McpHttpRequestHandler)
+        # Request concurrency is orthogonal to 'background': 'threaded' defaults
+        # to following 'background' so both transports behave consistently.
+        # IMPORTANT (headless idalib): in foreground mode every request is
+        # handled on the thread running serve_forever() - normally the MAIN
+        # thread. IDALib APIs (idapro.open_database etc.) and @idasync
+        # (execute_sync) both require the IDA main thread; a worker thread
+        # deadlocks on Windows/TCP, and execute_sync additionally needs the IDA
+        # GUI main loop to dispatch it. Request threaded=True only when the
+        # server never touches IDA itself (e.g. the pool relay) or when SSE
+        # concurrency is genuinely required.
+        use_threads = background if threaded is None else threaded
         if unix_socket:
-            server_cls = UnixThreadingHTTPServer if background else UnixHTTPServer
+            if not _HAS_AF_UNIX:
+                raise RuntimeError(
+                    "Unix domain sockets are not supported on this platform. "
+                    "Use host/port TCP transport instead."
+                )
+            server_cls = UnixThreadingHTTPServer if use_threads else UnixHTTPServer
             server_address: str | tuple[str, int] = unix_socket
         else:
             # SSE uses a long-lived GET stream plus follow-up POST requests,
-            # so foreground TCP servers still need concurrent request handling.
-            server_cls = ThreadingHTTPServer
+            # so it needs threaded handling - request threaded=True when SSE
+            # must be served from a foreground TCP endpoint.
+            server_cls = ThreadingHTTPServer if use_threads else HTTPServer
             server_address = (host, port)
 
         self._http_server = server_cls(
